@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "https://plaid-backend-gr01.onrender.com/api/$1"
+    }
+  ]
+}
