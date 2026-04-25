@@ -3,6 +3,10 @@
     {
       "source": "/api/(.*)",
       "destination": "https://plaid-backend-gr01.onrender.com/api/$1"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
     }
   ]
 }

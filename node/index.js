@@ -14,6 +14,7 @@ const APP_PORT = process.env.APP_PORT || 8000;
 const PLAID_CLIENT_ID = process.env.PLAID_CLIENT_ID;
 const PLAID_SECRET = process.env.PLAID_SECRET;
 const PLAID_ENV = process.env.PLAID_ENV || 'sandbox';
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -95,6 +96,249 @@ app.post('/api/info', function (request, response, next) {
     access_token: ACCESS_TOKEN,
     products: PLAID_PRODUCTS,
   });
+});
+
+const advanceApplications = new Map();
+
+const publicApplication = (application) => ({
+  id: application.id,
+  customer: application.customer,
+  requested_amount: application.requested_amount,
+  payday: application.payday,
+  status: application.status,
+  plaid_connected: Boolean(application.access_token),
+  item_id: application.item_id || null,
+  repayment: application.repayment,
+  created_at: application.created_at,
+  updated_at: application.updated_at,
+});
+
+const findApplication = (id, response) => {
+  const application = advanceApplications.get(id);
+  if (!application) {
+    response.status(404).json({ error: { error_message: 'Application not found' } });
+    return null;
+  }
+  return application;
+};
+
+const requireAdmin = (request, response) => {
+  if (!ADMIN_TOKEN) return true;
+  if (request.headers['x-admin-token'] === ADMIN_TOKEN) return true;
+  response.status(401).json({ error: { error_message: 'Admin token is required' } });
+  return false;
+};
+
+const appendApplicationMessage = (application, sender, text) => {
+  const message = {
+    id: uuidv4(),
+    sender,
+    text,
+    created_at: new Date().toISOString(),
+  };
+  application.messages.push(message);
+  application.updated_at = message.created_at;
+  return message;
+};
+
+app.post('/api/advance/applications', function (request, response) {
+  const now = new Date().toISOString();
+  const application = {
+    id: uuidv4(),
+    customer: {
+      name: request.body.name || '',
+      email: request.body.email || '',
+      phone: request.body.phone || '',
+      employer: request.body.employer || '',
+    },
+    requested_amount: Number(request.body.requested_amount || 50),
+    payday: request.body.payday || '',
+    status: 'intake',
+    access_token: null,
+    item_id: null,
+    messages: [],
+    repayment: null,
+    created_at: now,
+    updated_at: now,
+  };
+
+  appendApplicationMessage(
+    application,
+    'admin',
+    `Thanks ${application.customer.name || 'there'}. I have your $50 request. Next, connect your bank with Plaid so I can review income, balance, and recent activity.`,
+  );
+  appendApplicationMessage(
+    application,
+    'system',
+    'Use the Connect bank button first. If approved, the reviewer may ask for routing and account details for manual payout. Never send your online banking password.',
+  );
+
+  advanceApplications.set(application.id, application);
+  response.json({ application: publicApplication(application) });
+});
+
+app.get('/api/advance/applications/:id', function (request, response) {
+  const application = findApplication(request.params.id, response);
+  if (!application) return;
+  response.json({ application: publicApplication(application) });
+});
+
+app.get('/api/advance/applications/:id/messages', function (request, response) {
+  const application = findApplication(request.params.id, response);
+  if (!application) return;
+  response.json({ messages: application.messages });
+});
+
+app.post('/api/advance/applications/:id/messages', function (request, response) {
+  const application = findApplication(request.params.id, response);
+  if (!application) return;
+  const text = String(request.body.text || '').trim();
+  const sender = request.body.sender === 'admin' ? 'admin' : 'customer';
+  if (sender === 'admin' && !requireAdmin(request, response)) return;
+  if (!text) {
+    response.status(400).json({ error: { error_message: 'Message text is required' } });
+    return;
+  }
+  const message = appendApplicationMessage(application, sender, text);
+  response.json({ message });
+});
+
+app.post('/api/advance/applications/:id/create_link_token', function (request, response, next) {
+  const application = findApplication(request.params.id, response);
+  if (!application) return;
+
+  Promise.resolve()
+    .then(async function () {
+      const createTokenResponse = await client.linkTokenCreate({
+        user: {
+          client_user_id: application.id,
+        },
+        client_name: 'Cash Advance Review',
+        products: PLAID_PRODUCTS,
+        country_codes: PLAID_COUNTRY_CODES,
+        language: 'en',
+      });
+      response.json(createTokenResponse.data);
+    })
+    .catch(next);
+});
+
+app.post('/api/advance/applications/:id/set_access_token', function (request, response, next) {
+  const application = findApplication(request.params.id, response);
+  if (!application) return;
+
+  Promise.resolve()
+    .then(async function () {
+      const tokenResponse = await client.itemPublicTokenExchange({
+        public_token: request.body.public_token,
+      });
+      application.access_token = tokenResponse.data.access_token;
+      application.item_id = tokenResponse.data.item_id;
+      application.status = 'bank_connected';
+      application.updated_at = new Date().toISOString();
+      appendApplicationMessage(
+        application,
+        'system',
+        'Bank account connected. A reviewer will check the application and respond here.',
+      );
+      response.json({
+        application: publicApplication(application),
+        error: null,
+      });
+    })
+    .catch(next);
+});
+
+app.get('/api/advance/admin/applications', function (request, response) {
+  if (!requireAdmin(request, response)) return;
+  const applications = Array.from(advanceApplications.values())
+    .map(publicApplication)
+    .sort((a, b) => b.created_at.localeCompare(a.created_at));
+  response.json({ applications });
+});
+
+app.get('/api/advance/admin/applications/:id/bank_snapshot', function (request, response, next) {
+  if (!requireAdmin(request, response)) return;
+  const application = findApplication(request.params.id, response);
+  if (!application) return;
+  if (!application.access_token) {
+    response.status(400).json({ error: { error_message: 'Bank account is not connected yet' } });
+    return;
+  }
+
+  Promise.resolve()
+    .then(async function () {
+      const [accountsResponse, authResponse] = await Promise.allSettled([
+        client.accountsBalanceGet({ access_token: application.access_token }),
+        client.authGet({ access_token: application.access_token }),
+      ]);
+
+      let transactions = [];
+      try {
+        const syncResponse = await client.transactionsSync({
+          access_token: application.access_token,
+          cursor: null,
+          count: 20,
+        });
+        transactions = syncResponse.data.added || [];
+      } catch (error) {
+        transactions = [];
+      }
+
+      response.json({
+        accounts:
+          accountsResponse.status === 'fulfilled'
+            ? accountsResponse.value.data.accounts
+            : [],
+        auth:
+          authResponse.status === 'fulfilled'
+            ? authResponse.value.data
+            : null,
+        transactions,
+      });
+    })
+    .catch(next);
+});
+
+app.patch('/api/advance/admin/applications/:id/status', function (request, response) {
+  if (!requireAdmin(request, response)) return;
+  const application = findApplication(request.params.id, response);
+  if (!application) return;
+  const status = request.body.status;
+  const allowedStatuses = ['intake', 'bank_connected', 'reviewing', 'approved', 'denied', 'funded', 'repayment_scheduled', 'repaid', 'repayment_failed'];
+  if (!allowedStatuses.includes(status)) {
+    response.status(400).json({ error: { error_message: 'Unsupported status' } });
+    return;
+  }
+
+  application.status = status;
+  application.updated_at = new Date().toISOString();
+  if (request.body.note) {
+    appendApplicationMessage(application, 'admin', request.body.note);
+  }
+  response.json({ application: publicApplication(application) });
+});
+
+app.post('/api/advance/admin/applications/:id/repayment', function (request, response) {
+  if (!requireAdmin(request, response)) return;
+  const application = findApplication(request.params.id, response);
+  if (!application) return;
+
+  application.repayment = {
+    amount: Number(request.body.amount || application.requested_amount || 50),
+    due_date: request.body.due_date || application.payday,
+    status: 'scheduled_manual',
+    note: 'Recorded for manual/processor execution. This endpoint does not debit funds.',
+    created_at: new Date().toISOString(),
+  };
+  application.status = 'repayment_scheduled';
+  application.updated_at = application.repayment.created_at;
+  appendApplicationMessage(
+    application,
+    'system',
+    `Repayment of $${application.repayment.amount.toFixed(2)} recorded for ${application.repayment.due_date}.`,
+  );
+  response.json({ application: publicApplication(application) });
 });
 
 // Create a link token with configs which we can then use to initialize Plaid Link client-side.
