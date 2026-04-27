@@ -388,8 +388,67 @@ dd {
   color: #1f6b4d;
 }
 
+.loanDashboard {
+  display: grid;
+  gap: 2.4rem;
+}
+
+.loanHeader {
+  display: flex;
+  gap: 1.6rem;
+  align-items: start;
+  justify-content: space-between;
+}
+
+.loanHeader h2 {
+  margin: 0 0 0.4rem;
+  font-size: 2.8rem;
+}
+
+.loanHeader p {
+  margin: 0;
+  color: #607066;
+}
+
+.loanHeaderRight {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.8rem;
+}
+
+.loanGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.6rem;
+}
+
+.logoutBtn {
+  background: transparent;
+  border: 1px solid #cbd3c6;
+  color: #39463d;
+  font-size: 1.3rem;
+  min-height: 3.2rem;
+  padding: 0 1.2rem;
+}
+
+.dueDate {
+  font-weight: 700;
+  color: #7a2020;
+}
+
+.paidNote {
+  margin: 0;
+  border: 1px solid #9fd4b2;
+  border-radius: 0.6rem;
+  padding: 1rem;
+  color: #1f6b4d;
+  background: #e1f0e6;
+}
+
 @media (max-width: 860px) {
-  .searchRow {
+  .searchRow,
+  .loanGrid {
     grid-template-columns: 1fr;
   }
 }

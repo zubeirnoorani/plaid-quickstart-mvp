@@ -3,6 +3,9 @@
 // read env vars from .env file
 require('dotenv').config();
 const { Configuration, PlaidApi, Products, PlaidEnvironments, CraCheckReportProduct } = require('plaid');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const db = require('./db');
 const util = require('util');
 const { v4: uuidv4 } = require('uuid');
 const express = require('express');
@@ -15,6 +18,7 @@ const PLAID_CLIENT_ID = process.env.PLAID_CLIENT_ID;
 const PLAID_SECRET = process.env.PLAID_SECRET;
 const PLAID_ENV = process.env.PLAID_ENV || 'sandbox';
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
+const JWT_SECRET = process.env.JWT_SECRET || 'dev_jwt_secret_change_in_production';
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -98,30 +102,6 @@ app.post('/api/info', function (request, response, next) {
   });
 });
 
-const advanceApplications = new Map();
-
-const publicApplication = (application) => ({
-  id: application.id,
-  customer: application.customer,
-  requested_amount: application.requested_amount,
-  payday: application.payday,
-  status: application.status,
-  plaid_connected: Boolean(application.access_token),
-  item_id: application.item_id || null,
-  repayment: application.repayment,
-  created_at: application.created_at,
-  updated_at: application.updated_at,
-});
-
-const findApplication = (id, response) => {
-  const application = advanceApplications.get(id);
-  if (!application) {
-    response.status(404).json({ error: { error_message: 'Application not found' } });
-    return null;
-  }
-  return application;
-};
-
 const requireAdmin = (request, response) => {
   if (!ADMIN_TOKEN) return true;
   if (request.headers['x-admin-token'] === ADMIN_TOKEN) return true;
@@ -129,142 +109,154 @@ const requireAdmin = (request, response) => {
   return false;
 };
 
-const appendApplicationMessage = (application, sender, text) => {
-  const message = {
-    id: uuidv4(),
-    sender,
-    text,
-    created_at: new Date().toISOString(),
-  };
-  application.messages.push(message);
-  application.updated_at = message.created_at;
-  return message;
+const requireAuth = (request, response) => {
+  const header = request.headers['authorization'];
+  if (!header || !header.startsWith('Bearer ')) {
+    response.status(401).json({ error: { error_message: 'Authentication required' } });
+    return null;
+  }
+  try {
+    return jwt.verify(header.slice(7), JWT_SECRET);
+  } catch {
+    response.status(401).json({ error: { error_message: 'Invalid or expired token' } });
+    return null;
+  }
 };
 
-app.post('/api/advance/applications', function (request, response) {
-  const now = new Date().toISOString();
-  const application = {
-    id: uuidv4(),
-    customer: {
-      name: request.body.name || '',
-      email: request.body.email || '',
-      phone: request.body.phone || '',
-      employer: request.body.employer || '',
-    },
-    requested_amount: Number(request.body.requested_amount || 50),
-    payday: request.body.payday || '',
-    status: 'intake',
-    access_token: null,
-    item_id: null,
-    messages: [],
-    repayment: null,
-    created_at: now,
-    updated_at: now,
-  };
+// ── Advance application endpoints ─────────────────────────────────────────────
 
-  appendApplicationMessage(
-    application,
-    'admin',
-    `Thanks ${application.customer.name || 'there'}. I have your $50 request. Next, connect your bank with Plaid so I can review income, balance, and recent activity.`,
-  );
-  appendApplicationMessage(
-    application,
-    'system',
-    'Use the Connect bank button first. If approved, the reviewer may ask for routing and account details for manual payout. Never send your online banking password.',
-  );
-
-  advanceApplications.set(application.id, application);
-  response.json({ application: publicApplication(application) });
-});
-
-app.get('/api/advance/applications/:id', function (request, response) {
-  const application = findApplication(request.params.id, response);
-  if (!application) return;
-  response.json({ application: publicApplication(application) });
-});
-
-app.get('/api/advance/applications/:id/messages', function (request, response) {
-  const application = findApplication(request.params.id, response);
-  if (!application) return;
-  response.json({ messages: application.messages });
-});
-
-app.post('/api/advance/applications/:id/messages', function (request, response) {
-  const application = findApplication(request.params.id, response);
-  if (!application) return;
-  const text = String(request.body.text || '').trim();
-  const sender = request.body.sender === 'admin' ? 'admin' : 'customer';
-  if (sender === 'admin' && !requireAdmin(request, response)) return;
-  if (!text) {
-    response.status(400).json({ error: { error_message: 'Message text is required' } });
-    return;
+app.post('/api/advance/applications', async function (request, response, next) {
+  try {
+    const { name, email, phone, employer, payday, requested_amount, password } = request.body;
+    if (!password || password.length < 6) {
+      return response.status(400).json({ error: { error_message: 'Password must be at least 6 characters' } });
+    }
+    const password_hash = await bcrypt.hash(password, 10);
+    const row = await db.createApplication({ name: name || '', email: email || '', phone: phone || '', employer: employer || '', payday, requested_amount, password_hash });
+    await db.addMessage(row.id, 'admin', `Thanks ${name || 'there'}. I have your $50 request. Next, connect your bank with Plaid so I can review income, balance, and recent activity.`);
+    await db.addMessage(row.id, 'system', 'Use the Connect bank button. If approved, the reviewer may ask for routing and account details for manual payout. Never send your online banking password. Repayment is due within 30 days of funding.');
+    const token = jwt.sign({ applicationId: row.id }, JWT_SECRET, { expiresIn: '30d' });
+    response.json({ application: db.publicApp(row), token });
+  } catch (err) {
+    if (err.code === '23505') {
+      return response.status(409).json({ error: { error_message: 'An application with this email already exists. Please log in.' } });
+    }
+    next(err);
   }
-  const message = appendApplicationMessage(application, sender, text);
-  response.json({ message });
 });
 
-app.post('/api/advance/applications/:id/create_link_token', function (request, response, next) {
-  const application = findApplication(request.params.id, response);
-  if (!application) return;
-
-  Promise.resolve()
-    .then(async function () {
-      const createTokenResponse = await client.linkTokenCreate({
-        user: {
-          client_user_id: application.id,
-        },
-        client_name: 'Cash Advance Review',
-        products: PLAID_PRODUCTS,
-        country_codes: PLAID_COUNTRY_CODES,
-        language: 'en',
-      });
-      response.json(createTokenResponse.data);
-    })
-    .catch(next);
+app.get('/api/advance/applications/:id', async function (request, response, next) {
+  try {
+    const row = await db.getApplicationById(request.params.id);
+    if (!row) return response.status(404).json({ error: { error_message: 'Application not found' } });
+    response.json({ application: db.publicApp(row) });
+  } catch (err) { next(err); }
 });
 
-app.post('/api/advance/applications/:id/set_access_token', function (request, response, next) {
-  const application = findApplication(request.params.id, response);
-  if (!application) return;
-
-  Promise.resolve()
-    .then(async function () {
-      const tokenResponse = await client.itemPublicTokenExchange({
-        public_token: request.body.public_token,
-      });
-      application.access_token = tokenResponse.data.access_token;
-      application.item_id = tokenResponse.data.item_id;
-      application.status = 'bank_connected';
-      application.updated_at = new Date().toISOString();
-      appendApplicationMessage(
-        application,
-        'system',
-        'Bank account connected. A reviewer will check the application and respond here.',
-      );
-      response.json({
-        application: publicApplication(application),
-        error: null,
-      });
-    })
-    .catch(next);
+app.get('/api/advance/applications/:id/messages', async function (request, response, next) {
+  try {
+    const row = await db.getApplicationById(request.params.id);
+    if (!row) return response.status(404).json({ error: { error_message: 'Application not found' } });
+    const messages = await db.getMessages(row.id);
+    response.json({ messages });
+  } catch (err) { next(err); }
 });
 
-app.get('/api/advance/admin/applications', function (request, response) {
-  if (!requireAdmin(request, response)) return;
-  const applications = Array.from(advanceApplications.values())
-    .map(publicApplication)
-    .sort((a, b) => b.created_at.localeCompare(a.created_at));
-  response.json({ applications });
+app.post('/api/advance/applications/:id/messages', async function (request, response, next) {
+  try {
+    const row = await db.getApplicationById(request.params.id);
+    if (!row) return response.status(404).json({ error: { error_message: 'Application not found' } });
+    const text = String(request.body.text || '').trim();
+    const sender = request.body.sender === 'admin' ? 'admin' : 'customer';
+    if (sender === 'admin' && !requireAdmin(request, response)) return;
+    if (!text) return response.status(400).json({ error: { error_message: 'Message text is required' } });
+    const message = await db.addMessage(row.id, sender, text);
+    response.json({ message });
+  } catch (err) { next(err); }
 });
 
-app.get('/api/advance/admin/applications/:id/bank_snapshot', function (request, response, next) {
-  if (!requireAdmin(request, response)) return;
-  const application = findApplication(request.params.id, response);
-  if (!application) return;
-  if (!application.access_token) {
-    response.status(400).json({ error: { error_message: 'Bank account is not connected yet' } });
-    return;
+app.post('/api/advance/applications/:id/create_link_token', async function (request, response, next) {
+  try {
+    const row = await db.getApplicationById(request.params.id);
+    if (!row) return response.status(404).json({ error: { error_message: 'Application not found' } });
+    const createTokenResponse = await client.linkTokenCreate({
+      user: { client_user_id: row.id },
+      client_name: 'Cash Advance Review',
+      products: PLAID_PRODUCTS,
+      country_codes: PLAID_COUNTRY_CODES,
+      language: 'en',
+    });
+    response.json(createTokenResponse.data);
+  } catch (err) { next(err); }
+});
+
+app.post('/api/advance/applications/:id/set_access_token', async function (request, response, next) {
+  try {
+    const row = await db.getApplicationById(request.params.id);
+    if (!row) return response.status(404).json({ error: { error_message: 'Application not found' } });
+    const tokenResponse = await client.itemPublicTokenExchange({ public_token: request.body.public_token });
+    const updated = await db.setAccessToken(row.id, tokenResponse.data.access_token, tokenResponse.data.item_id);
+    await db.addMessage(row.id, 'system', 'Bank account connected. A reviewer will check the application and respond here.');
+    response.json({ application: db.publicApp(updated), error: null });
+  } catch (err) { next(err); }
+});
+
+// ── Auth endpoints ─────────────────────────────────────────────────────────────
+
+app.post('/api/advance/auth/login', async function (request, response, next) {
+  try {
+    const { email, password } = request.body;
+    const row = await db.getApplicationByEmail(email || '');
+    if (!row || !(await bcrypt.compare(password || '', row.password_hash))) {
+      return response.status(401).json({ error: { error_message: 'Invalid email or password' } });
+    }
+    const token = jwt.sign({ applicationId: row.id }, JWT_SECRET, { expiresIn: '30d' });
+    response.json({ application: db.publicApp(row), token });
+  } catch (err) { next(err); }
+});
+
+app.get('/api/advance/auth/me', async function (request, response, next) {
+  const payload = requireAuth(request, response);
+  if (!payload) return;
+  try {
+    const row = await db.getApplicationById(payload.applicationId);
+    if (!row) return response.status(404).json({ error: { error_message: 'Application not found' } });
+    const messages = await db.getMessages(row.id);
+    response.json({ application: db.publicApp(row), messages });
+  } catch (err) { next(err); }
+});
+
+app.post('/api/advance/applications/:id/payoff', async function (request, response, next) {
+  const payload = requireAuth(request, response);
+  if (!payload) return;
+  if (payload.applicationId !== request.params.id) {
+    return response.status(403).json({ error: { error_message: 'Forbidden' } });
   }
+  try {
+    const updated = await db.markRepaymentPaid(request.params.id);
+    if (!updated) return response.status(404).json({ error: { error_message: 'Application not found' } });
+    await db.addMessage(request.params.id, 'system', 'Customer has marked repayment as paid. Pending admin confirmation.');
+    const messages = await db.getMessages(request.params.id);
+    response.json({ application: db.publicApp(updated), messages });
+  } catch (err) { next(err); }
+});
+
+// ── Admin endpoints ────────────────────────────────────────────────────────────
+
+app.get('/api/advance/admin/applications', async function (request, response, next) {
+  if (!requireAdmin(request, response)) return;
+  try {
+    const rows = await db.getAllApplications();
+    response.json({ applications: rows.map(db.publicApp) });
+  } catch (err) { next(err); }
+});
+
+app.get('/api/advance/admin/applications/:id/bank_snapshot', async function (request, response, next) {
+  if (!requireAdmin(request, response)) return;
+  try {
+    const application = await db.getApplicationById(request.params.id);
+    if (!application) return response.status(404).json({ error: { error_message: 'Application not found' } });
+    if (!application.access_token) return response.status(400).json({ error: { error_message: 'Bank account is not connected yet' } });
 
   Promise.resolve()
     .then(async function () {
@@ -279,21 +271,19 @@ app.get('/api/advance/admin/applications/:id/bank_snapshot', function (request, 
         let cursor = undefined;
         let hasMore = true;
         let iterations = 0;
-        while (hasMore && iterations < 6) {
+        while (hasMore && iterations < 20) {
           const syncResponse = await client.transactionsSync({
             access_token: application.access_token,
             cursor,
-            count: 250,
+            count: 500,
           });
           allAdded = allAdded.concat(syncResponse.data.added || []);
           cursor = syncResponse.data.next_cursor;
           hasMore = syncResponse.data.has_more;
           iterations++;
         }
-        const cutoff = new Date();
-        cutoff.setDate(cutoff.getDate() - 90);
-        const cutoffStr = cutoff.toISOString().split('T')[0];
-        transactions = allAdded.filter(tx => tx.date >= cutoffStr);
+        // Sort newest first, return all available history (up to what Plaid provides — typically 24 months)
+        transactions = allAdded.sort((a, b) => new Date(b.date) - new Date(a.date));
       } catch (error) {
         transactions = [];
       }
@@ -311,16 +301,15 @@ app.get('/api/advance/admin/applications/:id/bank_snapshot', function (request, 
       });
     })
     .catch(next);
+  } catch (err) { next(err); }
 });
 
-app.get('/api/advance/admin/applications/:id/income_analysis', function (request, response, next) {
+app.get('/api/advance/admin/applications/:id/income_analysis', async function (request, response, next) {
   if (!requireAdmin(request, response)) return;
-  const application = findApplication(request.params.id, response);
-  if (!application) return;
-  if (!application.access_token) {
-    response.status(400).json({ error: { error_message: 'Bank account is not connected yet' } });
-    return;
-  }
+  try {
+    const application = await db.getApplicationById(request.params.id);
+    if (!application) return response.status(404).json({ error: { error_message: 'Application not found' } });
+    if (!application.access_token) return response.status(400).json({ error: { error_message: 'Bank account is not connected yet' } });
 
   Promise.resolve()
     .then(async function () {
@@ -329,11 +318,11 @@ app.get('/api/advance/admin/applications/:id/income_analysis', function (request
       let cursor = undefined;
       let hasMore = true;
       let iterations = 0;
-      while (hasMore && iterations < 10) {
+      while (hasMore && iterations < 20) {
         const syncResponse = await client.transactionsSync({
           access_token: application.access_token,
           cursor,
-          count: 250,
+          count: 500,
         });
         allAdded = allAdded.concat(syncResponse.data.added || []);
         cursor = syncResponse.data.next_cursor;
@@ -341,11 +330,7 @@ app.get('/api/advance/admin/applications/:id/income_analysis', function (request
         iterations++;
       }
 
-      // Filter to last 90 days
-      const cutoffDate = new Date();
-      cutoffDate.setDate(cutoffDate.getDate() - 90);
-      const cutoff = cutoffDate.toISOString().split('T')[0];
-      const recentTransactions = allAdded.filter(tx => tx.date >= cutoff);
+      const recentTransactions = allAdded;
 
       const employerName = (application.customer.employer || '').toLowerCase().trim();
       const employerWords = employerName.split(/\s+/).filter(w => w.length > 2);
@@ -468,47 +453,39 @@ app.get('/api/advance/admin/applications/:id/income_analysis', function (request
       });
     })
     .catch(next);
+  } catch (err) { next(err); }
 });
 
-app.patch('/api/advance/admin/applications/:id/status', function (request, response) {
+app.patch('/api/advance/admin/applications/:id/status', async function (request, response, next) {
   if (!requireAdmin(request, response)) return;
-  const application = findApplication(request.params.id, response);
-  if (!application) return;
-  const status = request.body.status;
-  const allowedStatuses = ['intake', 'bank_connected', 'reviewing', 'approved', 'denied', 'funded', 'repayment_scheduled', 'repaid', 'repayment_failed'];
-  if (!allowedStatuses.includes(status)) {
-    response.status(400).json({ error: { error_message: 'Unsupported status' } });
-    return;
-  }
-
-  application.status = status;
-  application.updated_at = new Date().toISOString();
-  if (request.body.note) {
-    appendApplicationMessage(application, 'admin', request.body.note);
-  }
-  response.json({ application: publicApplication(application) });
+  try {
+    const status = request.body.status;
+    const allowedStatuses = ['intake', 'bank_connected', 'reviewing', 'approved', 'denied', 'funded', 'repayment_scheduled', 'repaid', 'repayment_failed'];
+    if (!allowedStatuses.includes(status)) {
+      return response.status(400).json({ error: { error_message: 'Unsupported status' } });
+    }
+    const updated = await db.updateApplicationStatus(request.params.id, status);
+    if (!updated) return response.status(404).json({ error: { error_message: 'Application not found' } });
+    if (request.body.note) {
+      await db.addMessage(request.params.id, 'admin', request.body.note);
+    }
+    response.json({ application: db.publicApp(updated) });
+  } catch (err) { next(err); }
 });
 
-app.post('/api/advance/admin/applications/:id/repayment', function (request, response) {
+app.post('/api/advance/admin/applications/:id/repayment', async function (request, response, next) {
   if (!requireAdmin(request, response)) return;
-  const application = findApplication(request.params.id, response);
-  if (!application) return;
-
-  application.repayment = {
-    amount: Number(request.body.amount || application.requested_amount || 50),
-    due_date: request.body.due_date || application.payday,
-    status: 'scheduled_manual',
-    note: 'Recorded for manual/processor execution. This endpoint does not debit funds.',
-    created_at: new Date().toISOString(),
-  };
-  application.status = 'repayment_scheduled';
-  application.updated_at = application.repayment.created_at;
-  appendApplicationMessage(
-    application,
-    'system',
-    `Repayment of $${application.repayment.amount.toFixed(2)} recorded for ${application.repayment.due_date}.`,
-  );
-  response.json({ application: publicApplication(application) });
+  try {
+    const row = await db.getApplicationById(request.params.id);
+    if (!row) return response.status(404).json({ error: { error_message: 'Application not found' } });
+    const amount = Number(request.body.amount || row.requested_amount || 50);
+    const dueDate = new Date();
+    dueDate.setDate(dueDate.getDate() + 30);
+    const due_date = request.body.due_date || dueDate.toISOString().slice(0, 10);
+    const updated = await db.setRepayment(row.id, amount, due_date, 'Recorded for manual execution.');
+    await db.addMessage(row.id, 'system', `Repayment of $${amount.toFixed(2)} is due by ${due_date}. You have 30 days from funding to repay this advance.`);
+    response.json({ application: db.publicApp(updated) });
+  } catch (err) { next(err); }
 });
 
 // Create a link token with configs which we can then use to initialize Plaid Link client-side.

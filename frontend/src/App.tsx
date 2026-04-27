@@ -67,6 +67,7 @@ interface BankSnapshot {
 }
 
 const applicationStorageKey = "advance_application_id";
+const userTokenStorageKey = "advance_user_token";
 const adminTokenStorageKey = "advance_admin_token";
 
 const statusLabel: Record<Status, string> = {
@@ -121,8 +122,10 @@ function amountMatch(query: string, amount: number): boolean {
 }
 
 const App = () => {
-  const isAdmin = window.location.pathname === "/admin";
-  return isAdmin ? <AdminApp /> : <CustomerApp />;
+  const path = window.location.pathname;
+  if (path === "/admin") return <AdminApp />;
+  if (path === "/loan") return <LoanApp />;
+  return <CustomerApp />;
 };
 
 const CustomerApp = () => {
@@ -134,6 +137,8 @@ const CustomerApp = () => {
     phone: "",
     employer: "",
     payday: "",
+    password: "",
+    confirmPassword: "",
   });
   const [messageText, setMessageText] = useState("");
   const [linkToken, setLinkToken] = useState<string | null>(null);
@@ -176,20 +181,23 @@ const CustomerApp = () => {
 
   const createApplication = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (form.password !== form.confirmPassword) {
+      setError("Passwords do not match");
+      return;
+    }
     setIsBusy(true);
     setError(null);
     try {
+      const { confirmPassword, ...body } = form;
       const response = await fetch(apiUrl("/api/advance/applications"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ...form,
-          requested_amount: 50,
-        }),
+        body: JSON.stringify({ ...body, requested_amount: 50 }),
       });
-      if (!response.ok) throw new Error("Unable to start application");
       const data = await response.json();
+      if (!response.ok) throw new Error(data.error?.error_message || "Unable to start application");
       localStorage.setItem(applicationStorageKey, data.application.id);
+      if (data.token) localStorage.setItem(userTokenStorageKey, data.token);
       setApplication(data.application);
       await loadMessages(data.application.id);
     } catch (caughtError) {
@@ -339,9 +347,30 @@ const CustomerApp = () => {
                     onChange={(event) => setForm({ ...form, payday: event.target.value })}
                   />
                 </label>
+                <label>
+                  Password
+                  <input
+                    required
+                    type="password"
+                    minLength={6}
+                    placeholder="Min. 6 characters"
+                    value={form.password}
+                    onChange={(event) => setForm({ ...form, password: event.target.value })}
+                  />
+                </label>
+                <label>
+                  Confirm password
+                  <input
+                    required
+                    type="password"
+                    value={form.confirmPassword}
+                    onChange={(event) => setForm({ ...form, confirmPassword: event.target.value })}
+                  />
+                </label>
               </div>
               <div className={styles.chatAction}>
                 <p>In the next step you will connect your bank account. Please connect the account where your employer deposits your paycheck — this is required to verify income.</p>
+                <p>Repayment of $50 is due within <strong>30 days</strong> of receiving your advance. You can manage your loan and repay at any time by visiting <strong>/loan</strong>.</p>
               </div>
               {error && <p className={styles.error}>{error}</p>}
               <button disabled={isBusy}>{isBusy ? "Starting..." : "Continue to bank connection"}</button>
@@ -715,6 +744,184 @@ const BankSnapshotView = ({ snapshot }: { snapshot: BankSnapshot }) => {
         ))
       )}
     </div>
+  );
+};
+
+const LoanApp = () => {
+  const [token, setToken] = useState(() => localStorage.getItem(userTokenStorageKey) || "");
+  const [loginForm, setLoginForm] = useState({ email: "", password: "" });
+  const [application, setApplication] = useState<Application | null>(null);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [isBusy, setIsBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [payoffDone, setPayoffDone] = useState(false);
+
+  const authHeaders = useMemo<Record<string, string>>(
+    (): Record<string, string> => (token ? { Authorization: `Bearer ${token}` } : {}),
+    [token],
+  );
+
+  const loadMe = useCallback(async (hdrs: Record<string, string>) => {
+    const res = await fetch(apiUrl("/api/advance/auth/me"), { headers: hdrs });
+    if (!res.ok) { setToken(""); localStorage.removeItem(userTokenStorageKey); return; }
+    const data = await res.json();
+    setApplication(data.application);
+    setMessages(data.messages);
+  }, []);
+
+  useEffect(() => {
+    if (token) loadMe({ Authorization: `Bearer ${token}` });
+  }, [token, loadMe]);
+
+  useEffect(() => {
+    if (!token || !application) return;
+    const interval = window.setInterval(() => loadMe(authHeaders), 6000);
+    return () => window.clearInterval(interval);
+  }, [token, application, authHeaders, loadMe]);
+
+  const login = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setIsBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(apiUrl("/api/advance/auth/login"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(loginForm),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error?.error_message || "Login failed");
+      localStorage.setItem(userTokenStorageKey, data.token);
+      setToken(data.token);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Login failed");
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const payoff = async () => {
+    if (!application) return;
+    setIsBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(apiUrl(`/api/advance/applications/${application.id}/payoff`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders },
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error?.error_message || "Unable to process payoff");
+      setApplication(data.application);
+      setMessages(data.messages);
+      setPayoffDone(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Something went wrong");
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const logout = () => {
+    localStorage.removeItem(userTokenStorageKey);
+    setToken("");
+    setApplication(null);
+    setMessages([]);
+    setPayoffDone(false);
+  };
+
+  if (!token || !application) {
+    return (
+      <main className={styles.page}>
+        <section className={styles.chatOnly}>
+          <section className={styles.chat}>
+            <header>
+              <p className={styles.kicker}>Returning borrower</p>
+              <h1>Manage your loan</h1>
+              <p>Log in with the email and password you used when applying.</p>
+            </header>
+            <form className={styles.intakeComposer} onSubmit={login}>
+              <label>
+                Email
+                <input required type="email" value={loginForm.email}
+                  onChange={(e) => setLoginForm({ ...loginForm, email: e.target.value })} />
+              </label>
+              <label>
+                Password
+                <input required type="password" value={loginForm.password}
+                  onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })} />
+              </label>
+              {error && <p className={styles.error}>{error}</p>}
+              <button disabled={isBusy}>{isBusy ? "Logging in…" : "Log in"}</button>
+            </form>
+          </section>
+        </section>
+      </main>
+    );
+  }
+
+  const rep = application.repayment;
+  const canPayoff = !!rep && rep.status === "pending" &&
+    (application.status === "repayment_scheduled" || application.status === "funded");
+
+  return (
+    <main className={styles.page}>
+      <section className={styles.chatOnly}>
+        <section className={styles.loanDashboard}>
+          <div className={styles.loanHeader}>
+            <div>
+              <p className={styles.kicker}>Your loan</p>
+              <h2>{application.customer.name}</h2>
+              <p>{application.customer.email}</p>
+            </div>
+            <div className={styles.loanHeaderRight}>
+              <div className={styles.status}>{statusLabel[application.status]}</div>
+              <button className={styles.logoutBtn} onClick={logout}>Log out</button>
+            </div>
+          </div>
+
+          <div className={styles.loanGrid}>
+            <section className={styles.panel}>
+              <h3>Loan details</h3>
+              <dl>
+                <dt>Amount</dt><dd>{formatMoney(application.requested_amount)}</dd>
+                <dt>Employer</dt><dd>{application.customer.employer}</dd>
+                <dt>Payday</dt><dd>{application.payday}</dd>
+                <dt>Bank</dt><dd>{application.plaid_connected ? "Connected" : "Not connected"}</dd>
+              </dl>
+            </section>
+
+            <section className={styles.panel}>
+              <h3>Repayment</h3>
+              {!rep ? (
+                <p className={styles.muted}>No repayment scheduled yet. A reviewer will reach out once your advance is funded.</p>
+              ) : (
+                <>
+                  <dl>
+                    <dt>Amount due</dt><dd>{formatMoney(rep.amount)}</dd>
+                    <dt>Due date</dt><dd className={styles.dueDate}>{rep.due_date}</dd>
+                    <dt>Status</dt>
+                    <dd>{rep.status === "paid" ? "Paid" : "Pending"}</dd>
+                  </dl>
+                  <p className={styles.muted}>Repayment must be completed within <strong>30 days</strong> of funding.</p>
+                  {canPayoff && !payoffDone && (
+                    <button disabled={isBusy} onClick={payoff}>{isBusy ? "Processing…" : "Mark as repaid"}</button>
+                  )}
+                  {(payoffDone || rep.status === "paid") && (
+                    <p className={styles.paidNote}>Repayment recorded — thank you! The reviewer will confirm shortly.</p>
+                  )}
+                </>
+              )}
+              {error && <p className={styles.error}>{error}</p>}
+            </section>
+          </div>
+
+          <section className={styles.chat} style={{ marginTop: "2.4rem" }}>
+            <header><h3>Conversation history</h3></header>
+            <MessageList messages={messages} />
+          </section>
+        </section>
+      </section>
+    </main>
   );
 };
 
