@@ -355,12 +355,14 @@ const CustomerApp = () => {
                 <label>
                   Password
                   <input required type="password" minLength={6} placeholder="Min. 6 characters"
+                    autoComplete="new-password"
                     value={form.password}
                     onChange={(event) => setForm({ ...form, password: event.target.value })} />
                 </label>
                 <label>
                   Confirm password
-                  <input required type="password" value={form.confirmPassword}
+                  <input required type="password" autoComplete="new-password"
+                    value={form.confirmPassword}
                     onChange={(event) => setForm({ ...form, confirmPassword: event.target.value })} />
                 </label>
               </div>
