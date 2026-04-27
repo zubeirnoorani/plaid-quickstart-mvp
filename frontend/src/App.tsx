@@ -45,27 +45,6 @@ interface Message {
   created_at: string;
 }
 
-interface IncomeTransaction {
-  transaction_id: string;
-  name: string;
-  amount: number;
-  date: string;
-  income_score: number;
-}
-
-interface IncomeAnalysis {
-  stable: boolean;
-  income_transactions: IncomeTransaction[];
-  summary: {
-    months_checked: number;
-    months_with_income: number;
-    transaction_count: number;
-    avg_amount: number;
-    consistent_amounts: boolean;
-    reasoning: string;
-  };
-}
-
 interface BankSnapshot {
   accounts: Array<{
     account_id: string;
@@ -111,6 +90,35 @@ const formatMoney = (amount: number | null | undefined) => {
 };
 
 const today = new Date().toISOString().slice(0, 10);
+
+function levenshtein(a: string, b: string): number {
+  const dp = Array.from({ length: a.length + 1 }, (_, i) =>
+    Array.from({ length: b.length + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0))
+  );
+  for (let i = 1; i <= a.length; i++)
+    for (let j = 1; j <= b.length; j++)
+      dp[i][j] = a[i-1] === b[j-1] ? dp[i-1][j-1] : 1 + Math.min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1]);
+  return dp[a.length][b.length];
+}
+
+function fuzzyMatch(query: string, text: string): boolean {
+  if (!query.trim()) return true;
+  const q = query.toLowerCase().trim();
+  const t = text.toLowerCase();
+  if (t.includes(q)) return true;
+  const textWords = t.split(/\s+/);
+  return q.split(/\s+/).every(qw =>
+    textWords.some(tw => levenshtein(qw, tw) <= Math.max(1, Math.floor(qw.length / 3)))
+  );
+}
+
+function amountMatch(query: string, amount: number): boolean {
+  if (!query.trim()) return true;
+  const target = parseFloat(query);
+  if (isNaN(target) || target <= 0) return true;
+  const abs = Math.abs(amount);
+  return abs >= target * 0.75 && abs <= target * 1.25;
+}
 
 const App = () => {
   const isAdmin = window.location.pathname === "/admin";
@@ -332,6 +340,9 @@ const CustomerApp = () => {
                   />
                 </label>
               </div>
+              <div className={styles.chatAction}>
+                <p>In the next step you will connect your bank account. Please connect the account where your employer deposits your paycheck — this is required to verify income.</p>
+              </div>
               {error && <p className={styles.error}>{error}</p>}
               <button disabled={isBusy}>{isBusy ? "Starting..." : "Continue to bank connection"}</button>
             </form>
@@ -378,6 +389,7 @@ const CustomerApp = () => {
           {!application.plaid_connected && (
             <div className={styles.chatAction}>
               <p>Next step: connect your bank securely with Plaid so the reviewer can make a decision.</p>
+              <p><strong>Important:</strong> connect the account where your employer sends your direct deposit — not a savings or secondary account.</p>
               <button disabled={isBusy} onClick={createLinkToken}>
                 Connect bank with Plaid
               </button>
@@ -407,8 +419,6 @@ const AdminApp = () => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [messageText, setMessageText] = useState("");
   const [snapshot, setSnapshot] = useState<BankSnapshot | null>(null);
-  const [incomeAnalysis, setIncomeAnalysis] = useState<IncomeAnalysis | null>(null);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [repaymentDate, setRepaymentDate] = useState(today);
   const [isBusy, setIsBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -456,7 +466,6 @@ const AdminApp = () => {
     if (!selectedId) return;
     loadMessages(selectedId);
     setSnapshot(null);
-    setIncomeAnalysis(null);
   }, [selectedId, loadMessages]);
 
   const sendAdminMessage = async (event: React.FormEvent) => {
@@ -500,24 +509,6 @@ const AdminApp = () => {
       setError(caughtError instanceof Error ? caughtError.message : "Unable to load bank details");
     } finally {
       setIsBusy(false);
-    }
-  };
-
-  const analyzeIncome = async () => {
-    if (!selected) return;
-    setIsAnalyzing(true);
-    setError(null);
-    try {
-      const response = await fetch(apiUrl(`/api/advance/admin/applications/${selected.id}/income_analysis`), {
-        headers: adminHeaders,
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error?.error_message || "Unable to analyze income");
-      setIncomeAnalysis(data);
-    } catch (caughtError) {
-      setError(caughtError instanceof Error ? caughtError.message : "Unable to analyze income");
-    } finally {
-      setIsAnalyzing(false);
     }
   };
 
@@ -598,9 +589,6 @@ const AdminApp = () => {
                 </dl>
                 <div className={styles.actions}>
                   <button disabled={isBusy} onClick={loadBankSnapshot}>Load bank details</button>
-                  <button disabled={isBusy || isAnalyzing} onClick={analyzeIncome}>
-                    {isAnalyzing ? "Analyzing…" : "Analyze income"}
-                  </button>
                   <button
                     disabled={isBusy}
                     onClick={() =>
@@ -635,14 +623,6 @@ const AdminApp = () => {
                   <p className={styles.muted}>Load bank details after the applicant connects Plaid.</p>
                 ) : (
                   <BankSnapshotView snapshot={snapshot} />
-                )}
-                <h3>Income analysis</h3>
-                {isAnalyzing ? (
-                  <p className={styles.muted}>Analyzing transactions…</p>
-                ) : !incomeAnalysis ? (
-                  <p className={styles.muted}>Click "Analyze income" to check the last 3 months.</p>
-                ) : (
-                  <IncomeAnalysisView analysis={incomeAnalysis} />
                 )}
               </section>
             </div>
@@ -681,59 +661,61 @@ const MessageList = ({ messages }: { messages: Message[] }) => (
   </div>
 );
 
-const BankSnapshotView = ({ snapshot }: { snapshot: BankSnapshot }) => (
-  <div className={styles.snapshot}>
-    <h4>Accounts</h4>
-    {snapshot.accounts.map((account) => (
-      <div key={account.account_id} className={styles.account}>
-        <strong>{account.name}</strong>
-        <span>
-          {account.subtype || "account"} · {account.mask || "no mask"}
-        </span>
-        <span>Available {formatMoney(account.balances.available)}</span>
-        <span>Current {formatMoney(account.balances.current)}</span>
-      </div>
-    ))}
-    <h4>Recent transactions</h4>
-    {snapshot.transactions.slice(0, 8).map((transaction) => (
-      <div key={transaction.transaction_id} className={styles.transaction}>
-        <span>{transaction.date}</span>
-        <strong>{transaction.name}</strong>
-        <span>{formatMoney(transaction.amount)}</span>
-      </div>
-    ))}
-  </div>
-);
+const BankSnapshotView = ({ snapshot }: { snapshot: BankSnapshot }) => {
+  const [nameQuery, setNameQuery] = useState("");
+  const [amountQuery, setAmountQuery] = useState("");
 
-const IncomeAnalysisView = ({ analysis }: { analysis: IncomeAnalysis }) => (
-  <div className={styles.incomeAnalysis}>
-    <div className={analysis.stable ? styles.incomeVerdict : styles.incomeVerdictNo}>
-      <strong>{analysis.stable ? "YES — Stable income" : "NO — Unstable income"}</strong>
-      <span>{analysis.summary.reasoning}</span>
-    </div>
-    <dl>
-      <dt>Months with income</dt>
-      <dd>{analysis.summary.months_with_income} / {analysis.summary.months_checked}</dd>
-      <dt>Avg deposit</dt>
-      <dd>{formatMoney(analysis.summary.avg_amount)}</dd>
-      <dt>Consistent amounts</dt>
-      <dd>{analysis.summary.consistent_amounts ? "Yes" : "No"}</dd>
-      <dt>Deposits found</dt>
-      <dd>{analysis.summary.transaction_count}</dd>
-    </dl>
-    {analysis.income_transactions.length > 0 && (
-      <>
-        <h4>Identified income transactions</h4>
-        {analysis.income_transactions.map((tx) => (
-          <div key={tx.transaction_id} className={styles.incomeTransaction}>
+  const incoming = snapshot.transactions.filter(tx => tx.amount < 0);
+  const filtered = incoming.filter(
+    tx => fuzzyMatch(nameQuery, tx.name) && amountMatch(amountQuery, tx.amount)
+  );
+
+  return (
+    <div className={styles.snapshot}>
+      <h4>Accounts</h4>
+      {snapshot.accounts.map((account) => (
+        <div key={account.account_id} className={styles.account}>
+          <strong>{account.name}</strong>
+          <span>{account.subtype || "account"} · {account.mask || "no mask"}</span>
+          <span>Available {formatMoney(account.balances.available)}</span>
+          <span>Current {formatMoney(account.balances.current)}</span>
+        </div>
+      ))}
+      <h4>Incoming transactions</h4>
+      <div className={styles.searchRow}>
+        <label>
+          Search by name
+          <input
+            placeholder="e.g. employer name…"
+            value={nameQuery}
+            onChange={(e) => setNameQuery(e.target.value)}
+          />
+        </label>
+        <label>
+          Filter by amount (±25%)
+          <input
+            type="number"
+            min="0"
+            placeholder="e.g. 2000"
+            value={amountQuery}
+            onChange={(e) => setAmountQuery(e.target.value)}
+          />
+        </label>
+      </div>
+      <p className={styles.muted}>{filtered.length} of {incoming.length} incoming transaction{incoming.length !== 1 ? "s" : ""}</p>
+      {filtered.length === 0 ? (
+        <p className={styles.muted}>No matching transactions.</p>
+      ) : (
+        filtered.map((tx) => (
+          <div key={tx.transaction_id} className={styles.incomingTransaction}>
             <span>{tx.date}</span>
             <strong>{tx.name}</strong>
-            <span className={styles.incomeAmount}>{formatMoney(Math.abs(tx.amount))}</span>
+            <span className={styles.incomingAmount}>{formatMoney(Math.abs(tx.amount))}</span>
           </div>
-        ))}
-      </>
-    )}
-  </div>
-);
+        ))
+      )}
+    </div>
+  );
+};
 
 export default App;

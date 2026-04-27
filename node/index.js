@@ -275,12 +275,25 @@ app.get('/api/advance/admin/applications/:id/bank_snapshot', function (request, 
 
       let transactions = [];
       try {
-        const syncResponse = await client.transactionsSync({
-          access_token: application.access_token,
-          cursor: null,
-          count: 20,
-        });
-        transactions = syncResponse.data.added || [];
+        let allAdded = [];
+        let cursor = undefined;
+        let hasMore = true;
+        let iterations = 0;
+        while (hasMore && iterations < 6) {
+          const syncResponse = await client.transactionsSync({
+            access_token: application.access_token,
+            cursor,
+            count: 250,
+          });
+          allAdded = allAdded.concat(syncResponse.data.added || []);
+          cursor = syncResponse.data.next_cursor;
+          hasMore = syncResponse.data.has_more;
+          iterations++;
+        }
+        const cutoff = new Date();
+        cutoff.setDate(cutoff.getDate() - 90);
+        const cutoffStr = cutoff.toISOString().split('T')[0];
+        transactions = allAdded.filter(tx => tx.date >= cutoffStr);
       } catch (error) {
         transactions = [];
       }

@@ -366,48 +366,13 @@ dd {
   min-height: 30rem;
 }
 
-.incomeAnalysis {
+.searchRow {
   display: grid;
-  gap: 1.2rem;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1rem;
 }
 
-.incomeAnalysis h4 {
-  margin: 0.4rem 0 0;
-}
-
-.incomeVerdict,
-.incomeVerdictNo {
-  display: grid;
-  gap: 0.4rem;
-  border-radius: 0.6rem;
-  padding: 1.2rem;
-}
-
-.incomeVerdict {
-  background: #e1f0e6;
-  border: 1px solid #9fd4b2;
-}
-
-.incomeVerdict strong {
-  color: #1f6b4d;
-}
-
-.incomeVerdictNo {
-  background: #fff1f1;
-  border: 1px solid #e28b8b;
-}
-
-.incomeVerdictNo strong {
-  color: #7a2020;
-}
-
-.incomeVerdict span,
-.incomeVerdictNo span {
-  font-size: 1.3rem;
-  color: #39463d;
-}
-
-.incomeTransaction {
+.incomingTransaction {
   display: grid;
   grid-template-columns: 9rem minmax(0, 1fr) auto;
   gap: 0.3rem;
@@ -418,9 +383,15 @@ dd {
   background: #f1f8f3;
 }
 
-.incomeAmount {
+.incomingAmount {
   font-weight: 700;
   color: #1f6b4d;
+}
+
+@media (max-width: 860px) {
+  .searchRow {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 860px) {
