@@ -144,6 +144,7 @@ const CustomerApp = () => {
   const [linkToken, setLinkToken] = useState<string | null>(null);
   const [isBusy, setIsBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [view, setView] = useState<"landing" | "signup">("landing");
 
   const loadApplication = useCallback(async (id: string) => {
     const response = await fetch(apiUrl(`/api/advance/applications/${id}`));
@@ -272,6 +273,28 @@ const CustomerApp = () => {
   };
 
   if (!application) {
+    if (view === "landing") {
+      return (
+        <main className={styles.page}>
+          <section className={styles.chatOnly}>
+            <section className={styles.chat}>
+              <header>
+                <p className={styles.kicker}>Earned wage advance</p>
+                <h1>$50 cash advance</h1>
+                <p>Get up to $50 before your next payday. Repayment is due within 30 days of funding.</p>
+              </header>
+              <div className={styles.landingActions}>
+                <button onClick={() => window.location.href = "/loan"}>Sign in</button>
+                <button className={styles.secondaryBtn} onClick={() => setView("signup")}>
+                  First time? Apply here
+                </button>
+              </div>
+            </section>
+          </section>
+        </main>
+      );
+    }
+
     const starterMessages: Message[] = [
       {
         id: "welcome",
@@ -298,7 +321,7 @@ const CustomerApp = () => {
         <section className={styles.chatOnly}>
           <section className={styles.chat}>
             <header>
-              <p className={styles.kicker}>Live review chat</p>
+              <p className={styles.kicker}>New application</p>
               <h1>$50 cash advance</h1>
             </header>
             <MessageList messages={starterMessages} />
@@ -306,74 +329,50 @@ const CustomerApp = () => {
               <div className={styles.intakeGrid}>
                 <label>
                   Full name
-                  <input
-                    required
-                    value={form.name}
-                    onChange={(event) => setForm({ ...form, name: event.target.value })}
-                  />
+                  <input required value={form.name}
+                    onChange={(event) => setForm({ ...form, name: event.target.value })} />
                 </label>
                 <label>
                   Email
-                  <input
-                    required
-                    type="email"
-                    value={form.email}
-                    onChange={(event) => setForm({ ...form, email: event.target.value })}
-                  />
+                  <input required type="email" value={form.email}
+                    onChange={(event) => setForm({ ...form, email: event.target.value })} />
                 </label>
                 <label>
                   Phone
-                  <input
-                    required
-                    value={form.phone}
-                    onChange={(event) => setForm({ ...form, phone: event.target.value })}
-                  />
+                  <input required value={form.phone}
+                    onChange={(event) => setForm({ ...form, phone: event.target.value })} />
                 </label>
                 <label>
                   Employer
-                  <input
-                    required
-                    value={form.employer}
-                    onChange={(event) => setForm({ ...form, employer: event.target.value })}
-                  />
+                  <input required value={form.employer}
+                    onChange={(event) => setForm({ ...form, employer: event.target.value })} />
                 </label>
                 <label>
                   Next payday
-                  <input
-                    required
-                    min={today}
-                    type="date"
-                    value={form.payday}
-                    onChange={(event) => setForm({ ...form, payday: event.target.value })}
-                  />
+                  <input required min={today} type="date" value={form.payday}
+                    onChange={(event) => setForm({ ...form, payday: event.target.value })} />
                 </label>
                 <label>
                   Password
-                  <input
-                    required
-                    type="password"
-                    minLength={6}
-                    placeholder="Min. 6 characters"
+                  <input required type="password" minLength={6} placeholder="Min. 6 characters"
                     value={form.password}
-                    onChange={(event) => setForm({ ...form, password: event.target.value })}
-                  />
+                    onChange={(event) => setForm({ ...form, password: event.target.value })} />
                 </label>
                 <label>
                   Confirm password
-                  <input
-                    required
-                    type="password"
-                    value={form.confirmPassword}
-                    onChange={(event) => setForm({ ...form, confirmPassword: event.target.value })}
-                  />
+                  <input required type="password" value={form.confirmPassword}
+                    onChange={(event) => setForm({ ...form, confirmPassword: event.target.value })} />
                 </label>
               </div>
               <div className={styles.chatAction}>
                 <p>In the next step you will connect your bank account. Please connect the account where your employer deposits your paycheck — this is required to verify income.</p>
-                <p>Repayment of $50 is due within <strong>30 days</strong> of receiving your advance. You can manage your loan and repay at any time by visiting <strong>/loan</strong>.</p>
+                <p>Repayment of $50 is due within <strong>30 days</strong> of funding.</p>
               </div>
               {error && <p className={styles.error}>{error}</p>}
-              <button disabled={isBusy}>{isBusy ? "Starting..." : "Continue to bank connection"}</button>
+              <div className={styles.intakeFooter}>
+                <button type="button" className={styles.backBtn} onClick={() => setView("landing")}>Back</button>
+                <button disabled={isBusy}>{isBusy ? "Starting..." : "Continue to bank connection"}</button>
+              </div>
             </form>
           </section>
         </section>

@@ -388,6 +388,33 @@ dd {
   color: #1f6b4d;
 }
 
+.landingActions {
+  display: grid;
+  gap: 1rem;
+}
+
+.secondaryBtn {
+  background: transparent;
+  border: 2px solid #1f6b4d;
+  color: #1f6b4d;
+}
+
+.secondaryBtn:hover {
+  background: #eaf4ee;
+}
+
+.backBtn {
+  background: transparent;
+  border: 1px solid #cbd3c6;
+  color: #39463d;
+}
+
+.intakeFooter {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 1rem;
+}
+
 .loanDashboard {
   display: grid;
   gap: 2.4rem;
