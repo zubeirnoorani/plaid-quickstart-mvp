@@ -45,6 +45,27 @@ interface Message {
   created_at: string;
 }
 
+interface IncomeTransaction {
+  transaction_id: string;
+  name: string;
+  amount: number;
+  date: string;
+  income_score: number;
+}
+
+interface IncomeAnalysis {
+  stable: boolean;
+  income_transactions: IncomeTransaction[];
+  summary: {
+    months_checked: number;
+    months_with_income: number;
+    transaction_count: number;
+    avg_amount: number;
+    consistent_amounts: boolean;
+    reasoning: string;
+  };
+}
+
 interface BankSnapshot {
   accounts: Array<{
     account_id: string;
@@ -386,6 +407,8 @@ const AdminApp = () => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [messageText, setMessageText] = useState("");
   const [snapshot, setSnapshot] = useState<BankSnapshot | null>(null);
+  const [incomeAnalysis, setIncomeAnalysis] = useState<IncomeAnalysis | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [repaymentDate, setRepaymentDate] = useState(today);
   const [isBusy, setIsBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -433,6 +456,7 @@ const AdminApp = () => {
     if (!selectedId) return;
     loadMessages(selectedId);
     setSnapshot(null);
+    setIncomeAnalysis(null);
   }, [selectedId, loadMessages]);
 
   const sendAdminMessage = async (event: React.FormEvent) => {
@@ -476,6 +500,24 @@ const AdminApp = () => {
       setError(caughtError instanceof Error ? caughtError.message : "Unable to load bank details");
     } finally {
       setIsBusy(false);
+    }
+  };
+
+  const analyzeIncome = async () => {
+    if (!selected) return;
+    setIsAnalyzing(true);
+    setError(null);
+    try {
+      const response = await fetch(apiUrl(`/api/advance/admin/applications/${selected.id}/income_analysis`), {
+        headers: adminHeaders,
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error?.error_message || "Unable to analyze income");
+      setIncomeAnalysis(data);
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "Unable to analyze income");
+    } finally {
+      setIsAnalyzing(false);
     }
   };
 
@@ -556,6 +598,9 @@ const AdminApp = () => {
                 </dl>
                 <div className={styles.actions}>
                   <button disabled={isBusy} onClick={loadBankSnapshot}>Load bank details</button>
+                  <button disabled={isBusy || isAnalyzing} onClick={analyzeIncome}>
+                    {isAnalyzing ? "Analyzing…" : "Analyze income"}
+                  </button>
                   <button
                     disabled={isBusy}
                     onClick={() =>
@@ -590,6 +635,14 @@ const AdminApp = () => {
                   <p className={styles.muted}>Load bank details after the applicant connects Plaid.</p>
                 ) : (
                   <BankSnapshotView snapshot={snapshot} />
+                )}
+                <h3>Income analysis</h3>
+                {isAnalyzing ? (
+                  <p className={styles.muted}>Analyzing transactions…</p>
+                ) : !incomeAnalysis ? (
+                  <p className={styles.muted}>Click "Analyze income" to check the last 3 months.</p>
+                ) : (
+                  <IncomeAnalysisView analysis={incomeAnalysis} />
                 )}
               </section>
             </div>
@@ -649,6 +702,37 @@ const BankSnapshotView = ({ snapshot }: { snapshot: BankSnapshot }) => (
         <span>{formatMoney(transaction.amount)}</span>
       </div>
     ))}
+  </div>
+);
+
+const IncomeAnalysisView = ({ analysis }: { analysis: IncomeAnalysis }) => (
+  <div className={styles.incomeAnalysis}>
+    <div className={analysis.stable ? styles.incomeVerdict : styles.incomeVerdictNo}>
+      <strong>{analysis.stable ? "YES — Stable income" : "NO — Unstable income"}</strong>
+      <span>{analysis.summary.reasoning}</span>
+    </div>
+    <dl>
+      <dt>Months with income</dt>
+      <dd>{analysis.summary.months_with_income} / {analysis.summary.months_checked}</dd>
+      <dt>Avg deposit</dt>
+      <dd>{formatMoney(analysis.summary.avg_amount)}</dd>
+      <dt>Consistent amounts</dt>
+      <dd>{analysis.summary.consistent_amounts ? "Yes" : "No"}</dd>
+      <dt>Deposits found</dt>
+      <dd>{analysis.summary.transaction_count}</dd>
+    </dl>
+    {analysis.income_transactions.length > 0 && (
+      <>
+        <h4>Identified income transactions</h4>
+        {analysis.income_transactions.map((tx) => (
+          <div key={tx.transaction_id} className={styles.incomeTransaction}>
+            <span>{tx.date}</span>
+            <strong>{tx.name}</strong>
+            <span className={styles.incomeAmount}>{formatMoney(Math.abs(tx.amount))}</span>
+          </div>
+        ))}
+      </>
+    )}
   </div>
 );
 

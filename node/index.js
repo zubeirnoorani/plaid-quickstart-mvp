@@ -300,6 +300,163 @@ app.get('/api/advance/admin/applications/:id/bank_snapshot', function (request, 
     .catch(next);
 });
 
+app.get('/api/advance/admin/applications/:id/income_analysis', function (request, response, next) {
+  if (!requireAdmin(request, response)) return;
+  const application = findApplication(request.params.id, response);
+  if (!application) return;
+  if (!application.access_token) {
+    response.status(400).json({ error: { error_message: 'Bank account is not connected yet' } });
+    return;
+  }
+
+  Promise.resolve()
+    .then(async function () {
+      // Paginate through all transactions via transactionsSync
+      let allAdded = [];
+      let cursor = undefined;
+      let hasMore = true;
+      let iterations = 0;
+      while (hasMore && iterations < 10) {
+        const syncResponse = await client.transactionsSync({
+          access_token: application.access_token,
+          cursor,
+          count: 250,
+        });
+        allAdded = allAdded.concat(syncResponse.data.added || []);
+        cursor = syncResponse.data.next_cursor;
+        hasMore = syncResponse.data.has_more;
+        iterations++;
+      }
+
+      // Filter to last 90 days
+      const cutoffDate = new Date();
+      cutoffDate.setDate(cutoffDate.getDate() - 90);
+      const cutoff = cutoffDate.toISOString().split('T')[0];
+      const recentTransactions = allAdded.filter(tx => tx.date >= cutoff);
+
+      const employerName = (application.customer.employer || '').toLowerCase().trim();
+      const employerWords = employerName.split(/\s+/).filter(w => w.length > 2);
+
+      // Detect recurring credit amounts (same bucket ±$25, appearing 2+ times)
+      const creditTxs = recentTransactions.filter(tx => tx.amount < 0);
+      const amountBuckets = {};
+      creditTxs.forEach(tx => {
+        const key = Math.round(Math.abs(tx.amount) / 25) * 25;
+        if (!amountBuckets[key]) amountBuckets[key] = [];
+        amountBuckets[key].push(tx.transaction_id);
+      });
+      const recurringIds = new Set();
+      Object.values(amountBuckets).forEach(ids => {
+        if (ids.length >= 2) ids.forEach(id => recurringIds.add(id));
+      });
+
+      function scoreTransaction(tx) {
+        // Only credits (money into account = negative amount in Plaid)
+        if (tx.amount >= 0) return 0;
+
+        let score = 0;
+        const name = (tx.name || '').toLowerCase();
+
+        // Employer name word match
+        if (employerWords.length > 0) {
+          const matched = employerWords.filter(w => name.includes(w)).length;
+          if (matched > 0) score += Math.min(4, matched * 2);
+        }
+
+        // Plaid category match
+        const categories = (tx.category || []).map(c => c.toLowerCase());
+        if (categories.some(c => /payroll|income|salary|wage/.test(c))) score += 3;
+        if (categories.some(c => /transfer/.test(c))) score += 1;
+
+        // Common payroll deposit keywords
+        const payrollKeywords = ['direct dep', 'dir dep', 'ddep', 'payroll', 'salary', 'wages', ' pay ', 'income', 'paystub', 'deposit'];
+        if (payrollKeywords.some(k => name.includes(k))) score += 2;
+
+        // Amount thresholds
+        const abs = Math.abs(tx.amount);
+        if (abs >= 1000) score += 2;
+        else if (abs >= 300) score += 1;
+        else if (abs < 50) score -= 2;
+
+        // Recurring pattern bonus
+        if (recurringIds.has(tx.transaction_id)) score += 1;
+
+        return score;
+      }
+
+      // Collect income candidates (score >= 2)
+      const incomeTransactions = recentTransactions
+        .filter(tx => tx.amount < 0)
+        .map(tx => ({ ...tx, income_score: scoreTransaction(tx) }))
+        .filter(tx => tx.income_score >= 2)
+        .sort((a, b) => new Date(b.date) - new Date(a.date));
+
+      // Group by month (YYYY-MM)
+      const byMonth = {};
+      incomeTransactions.forEach(tx => {
+        const month = tx.date.substring(0, 7);
+        if (!byMonth[month]) byMonth[month] = [];
+        byMonth[month].push(tx);
+      });
+
+      // Determine which of the last 3 calendar months have income
+      const last3Months = [];
+      for (let i = 2; i >= 0; i--) {
+        const d = new Date();
+        d.setDate(1);
+        d.setMonth(d.getMonth() - i);
+        last3Months.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+      }
+      const monthsWithIncome = last3Months.filter(m => byMonth[m] && byMonth[m].length > 0).length;
+
+      // Consistency: coefficient of variation of amounts < 50%
+      const amounts = incomeTransactions.map(tx => Math.abs(tx.amount));
+      let consistentAmounts = true;
+      if (amounts.length >= 2) {
+        const mean = amounts.reduce((a, b) => a + b, 0) / amounts.length;
+        const variance = amounts.reduce((s, a) => s + Math.pow(a - mean, 2), 0) / amounts.length;
+        consistentAmounts = Math.sqrt(variance) / mean < 0.5;
+      }
+
+      const avgAmount = amounts.length > 0
+        ? Math.round((amounts.reduce((a, b) => a + b, 0) / amounts.length) * 100) / 100
+        : 0;
+
+      const stable = monthsWithIncome >= 3 && consistentAmounts;
+
+      let reasoning;
+      if (incomeTransactions.length === 0) {
+        reasoning = 'No income deposits could be identified in the last 90 days.';
+      } else if (monthsWithIncome < 3) {
+        reasoning = `Income deposits found in only ${monthsWithIncome} of the last 3 months.`;
+      } else if (!consistentAmounts) {
+        reasoning = 'Income deposits are present each month but amounts vary significantly.';
+      } else {
+        reasoning = `Consistent income deposits detected in all 3 of the last 3 months.`;
+      }
+
+      response.json({
+        stable,
+        income_transactions: incomeTransactions.map(tx => ({
+          transaction_id: tx.transaction_id,
+          name: tx.name,
+          amount: tx.amount,
+          date: tx.date,
+          income_score: tx.income_score,
+        })),
+        summary: {
+          months_checked: 3,
+          months_with_income: monthsWithIncome,
+          transaction_count: incomeTransactions.length,
+          avg_amount: avgAmount,
+          consistent_amounts: consistentAmounts,
+          reasoning,
+        },
+      });
+    })
+    .catch(next);
+});
+
 app.patch('/api/advance/admin/applications/:id/status', function (request, response) {
   if (!requireAdmin(request, response)) return;
   const application = findApplication(request.params.id, response);
